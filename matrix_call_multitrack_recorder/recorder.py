@@ -8,9 +8,10 @@ import os
 import random
 import string
 from typing import Dict, List, Optional, Tuple, Union
+import sys
+import time
 from logbook import Logger, StreamHandler
 import logbook
-import sys
 from nio import (
     AsyncClient,
     CallInviteEvent,
@@ -24,10 +25,9 @@ from nio import (
     ToDeviceCallHangupEvent,
 )
 from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
-from aiortc.contrib.media import MediaRecorder, MediaBlackhole
+from aiortc.contrib.media import MediaRecorder
 from aiortc.rtcicetransport import candidate_from_aioice
 from aioice.candidate import Candidate
-import time
 
 StreamHandler(sys.stdout).push_application()
 logger = Logger(__name__)
@@ -138,7 +138,6 @@ class Recorder:
                     state_key=self.client.user_id,
                 )
             await conn.pc.close()
-        pass
 
     def add_call(self, conf_id: ConfID, room: MatrixRoom) -> None:
         logger.info(f"Adding conf {conf_id} to room {room.room_id}")
@@ -527,7 +526,7 @@ class Recorder:
 
         try:
             conn = self.conns[unique_id]
-        except KeyError as e:
+        except KeyError:
             logger.warning("Received candidates for unknown call")
             return
         logger.info("Waiting for prepare")
@@ -545,8 +544,8 @@ class Recorder:
                 candidate = candidate_from_aioice(
                     Candidate.from_sdp(raw_candidate.get("candidate"))
                 )
-            except ValueError as e:
-                logger.warning("Received invalid candidate: %s", e)
+            except ValueError as error:
+                logger.warning(f"Received invalid candidate: {error}")
                 continue
             candidate.sdpMid = raw_candidate.get("sdpMid")
             candidate.sdpMLineIndex = raw_candidate.get("sdpMLineIndex")

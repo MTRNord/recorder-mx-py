@@ -3,10 +3,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 import asyncio
+import sys
 
 from logbook import Logger, StreamHandler
 import logbook
-import sys
 
 from matrix_call_multitrack_recorder.bot import RecordingBot, login
 
@@ -16,28 +16,28 @@ logger.level = logbook.INFO
 
 # Entry
 
-bot = None
+BOT = None
 
 
 async def main() -> None:
     logger.info("Starting bot...")
     client = await login()
-    global bot
-    bot = RecordingBot(client=client)
+    global BOT
+    BOT = RecordingBot(client=client)
 
-    await bot.start()
+    await BOT.start()
 
 
 if __name__ == "__main__":
     try:
         asyncio.get_event_loop().run_until_complete(main())
     except Exception:
-        if bot:
-            asyncio.get_event_loop().run_until_complete(bot.stop())
+        if BOT:
+            asyncio.get_event_loop().run_until_complete(BOT.stop())
         logger.exception("Fatal Runtime error.")
         sys.exit(1)
     except KeyboardInterrupt:
-        if bot:
-            asyncio.get_event_loop().run_until_complete(bot.stop())
+        if BOT:
+            asyncio.get_event_loop().run_until_complete(BOT.stop())
         print("Received keyboard interrupt.")
         sys.exit(0)

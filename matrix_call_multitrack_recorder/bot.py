@@ -7,6 +7,7 @@ import getpass
 import json
 import os
 import sys
+from nio.events import to_device
 from nio import (
     AsyncClient,
     LoginResponse,
@@ -20,7 +21,6 @@ from nio import (
     AsyncClientConfig,
     InviteEvent,
     MSC3401CallEvent,
-    to_device,
     CallMemberEvent,
     RoomMessageText,
     ProfileGetDisplayNameResponse,
@@ -28,7 +28,6 @@ from nio import (
 
 from logbook import Logger, StreamHandler
 import logbook
-import sys
 
 from matrix_call_multitrack_recorder.recorder import Recorder
 
@@ -90,7 +89,6 @@ class RecordingBot:
         logger.info("Stopping client")
         await self.recorder.stop()
         await self.client.close()
-        pass
 
     async def message_callback(self, room: MatrixRoom, event: RoomMessageText) -> None:
         """Handles incoming messages."""
@@ -121,7 +119,6 @@ class RecordingBot:
                 await self.recorder.join_call(room)
 
         asyncio.create_task(command_handling())
-        pass
 
     # TODO: Negotiate new streams
     # TODO: Handle m.call.negotiate to-device events
@@ -222,7 +219,7 @@ def write_details_to_disk(resp: LoginResponse, homeserver) -> None:
         homeserver -- URL of homeserver, e.g. "https://matrix.example.org"
     """
     # open the config file in write-mode
-    with open(CONFIG_FILE, "w") as f:
+    with open(CONFIG_FILE, "w", encoding="utf8") as f:
         # write the login details to disk
         json.dump(
             {
@@ -286,7 +283,7 @@ async def login() -> AsyncClient:
     # Otherwise the config file exists, so we'll use the stored credentials
     else:
         # open the file in read-only mode
-        with open(CONFIG_FILE, "r") as f:
+        with open(CONFIG_FILE, "r", encoding="utf8") as f:
             config = json.load(f)
             client = AsyncClient(
                 config["homeserver"],
