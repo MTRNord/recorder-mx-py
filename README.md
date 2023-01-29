@@ -10,6 +10,12 @@
 - [Installation](#installation)
 - [License](#license)
 
+## Production-readyness
+
+This bot currently is missing some polishing especially on stability and usability.
+Also it doesnt work with rejoining currently or changing streams.
+Therefor I do recommend it should not be used in production just yet.
+
 ## Installation
 
 Due to changes to the nio dependency I currently cant upload it to pypi.
