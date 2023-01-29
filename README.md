@@ -12,8 +12,11 @@
 
 ## Installation
 
+Due to changes to the nio dependency I currently cant upload it to pypi.
+For now you have to install it from git directly:
+
 ```console
-pip install matrix-call-multitrack-recorder
+pip install git+https://git.nordgedanken.dev/mtrnord/matrix-call-multitrack-recorder.git
 ```
 
 ## License

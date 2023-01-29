@@ -153,6 +153,7 @@ class RecordingBot:
         logger.info(f"MSC3401 call member event: {event}")
 
         for call in event.calls:
+            # TODO: Can I reuse the same connection? Do I have the info needed? Is it a new connection?
             pass
             # asyncio.create_task(self.handle_call_invite(event, room))
 
