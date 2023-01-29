@@ -62,24 +62,24 @@ class RecordingBot:
             await self.client.keys_upload()
             logger.debug("Uploaded keys")
 
-        self.client.add_event_callback(self.message_callback, RoomMessageText)
-        self.client.add_event_callback(self.call_candidates, CallCandidatesEvent)
-        self.client.add_event_callback(self.call_invite, CallInviteEvent)
-        self.client.add_event_callback(self.call_hangup, CallHangupEvent)
-        self.client.add_event_callback(self.msc3401_call, MSC3401CallEvent)
-        self.client.add_event_callback(self.msc3401_call_member, CallMemberEvent)
+        self.client.add_event_callback(self.message_callback, RoomMessageText)  # type: ignore
+        self.client.add_event_callback(self.call_candidates, CallCandidatesEvent)  # type: ignore
+        self.client.add_event_callback(self.call_invite, CallInviteEvent)  # type: ignore
+        self.client.add_event_callback(self.call_hangup, CallHangupEvent)  # type: ignore
+        self.client.add_event_callback(self.msc3401_call, MSC3401CallEvent)  # type: ignore
+        self.client.add_event_callback(self.msc3401_call_member, CallMemberEvent)  # type: ignore
 
         self.client.add_to_device_callback(
-            self.to_device_call_candidates, (ToDeviceCallCandidatesEvent,)
+            self.to_device_call_candidates, (ToDeviceCallCandidatesEvent,)  # type: ignore
         )
         self.client.add_to_device_callback(
-            self.to_device_call_invite, (ToDeviceCallInviteEvent,)
+            self.to_device_call_invite, (ToDeviceCallInviteEvent,)  # type: ignore
         )
         self.client.add_to_device_callback(
-            self.to_device_call_hangup, (ToDeviceCallHangupEvent,)
+            self.to_device_call_hangup, (ToDeviceCallHangupEvent,)  # type: ignore
         )
 
-        self.client.add_event_callback(self.cb_autojoin_room, InviteEvent)
+        self.client.add_event_callback(self.cb_autojoin_room, InviteEvent)  # type: ignore
         logger.info("Listening for calls")
 
         await self.client.sync_forever(
@@ -124,7 +124,7 @@ class RecordingBot:
         if event.sender == self.client.user_id:
             return
 
-        logger.info(f"MSC3401 call member event: {event}")
+        # logger.info(f"MSC3401 call member event: {event}")
         if not event.calls:
             await self.recorder.remove_connection(room)
 

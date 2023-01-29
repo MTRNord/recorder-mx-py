@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import os
 import random
 import string
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 from logbook import Logger, StreamHandler
 import logbook
 import sys
@@ -49,7 +49,12 @@ class WrappedConn:
     prepare_waiter: asyncio.Future
     candidate_waiter: asyncio.Future
     room_id: Optional[str]
-    others: Optional[Dict[UserID, str]]
+
+
+@dataclass
+class Others:
+    user_id: str
+    device_id: str
 
 
 class Recorder:
@@ -59,6 +64,7 @@ class Recorder:
     loop: asyncio.AbstractEventLoop
     conf_room: Dict[ConfID, MatrixRoom]
     room_conf: Dict[RoomID, ConfID]
+    others: Dict[ConfID, List[Others]]
 
     def __init__(self, client) -> None:
         self.client = client
@@ -68,6 +74,7 @@ class Recorder:
         self.conns = {}
         self.conf_room = {}
         self.room_conf = {}
+        self.others = {}
         self.party_id = "".join(
             random.choices(string.ascii_letters + string.digits, k=8)
         )
@@ -80,14 +87,15 @@ class Recorder:
     async def stop(self) -> None:
         logger.info("Stopping recording handler")
         for (_, conf_or_call_id), conn in self.conns.items():
-            hangup = {
-                "content": {
-                    "call_id": conf_or_call_id,
-                    "version": 1,
-                    "party_id": self.party_id,
-                }
-            }
+
             if conn.room_id:
+                hangup = {
+                    "content": {
+                        "call_id": conf_or_call_id,
+                        "version": 1,
+                        "party_id": self.party_id,
+                    }
+                }
                 # We are lazy and send it to the room and as to_device message
                 await self.client.room_send(
                     conn.room_id,
@@ -96,13 +104,22 @@ class Recorder:
                     ignore_unverified_devices=True,
                 )
             else:
-                if conn.others:
+                hangup = {
+                    "content": {
+                        "call_id": conf_or_call_id,
+                        "version": "1",
+                        "party_id": self.party_id,
+                    }
+                }
+                if conf_or_call_id in self.others:
                     # Send it as to_device message
-                    for user_id, device_id in conn.others.items():
+                    others = self.others[conf_or_call_id]
+
+                    for data in others:
                         message = ToDeviceMessage(
                             "m.call.hangup",
-                            user_id,
-                            device_id,
+                            data.user_id,
+                            data.device_id,
                             hangup,
                         )
                         await self.client.to_device(message)
@@ -135,22 +152,20 @@ class Recorder:
             del self.room_conf[room.room_id]
 
             for (user_id, conf_or_call_id), conn in list(self.conns.items()):
-
-                if conn.others:
-                    for (other_user_id, device_id) in conn.others.items():
-
+                if conf_or_call_id in self.others:
+                    others = self.others[conf_or_call_id]
+                    for data in others:
                         hangup_message = ToDeviceMessage(
                             "m.call.hangup",
-                            other_user_id,
-                            device_id,
+                            data.user_id,
+                            data.device_id,
                             {
-                                "content": {
-                                    "call_id": conf_id,
-                                    "version": 1,
-                                    "party_id": self.party_id,
-                                }
+                                "call_id": conf_id,
+                                "version": "1",
+                                "party_id": self.party_id,
                             },
                         )
+                        logger.info(f"Sending hangup {hangup_message}")
                         await self.client.to_device(hangup_message)
 
                 await conn.pc.close()
@@ -177,11 +192,10 @@ class Recorder:
                 del self.room_conf[room.room_id]
                 del self.conf_room[call_id]
 
-    def track_others(self, call_id: str, device_id: str, user_id: str) -> None:
-        call = self.conns[(self.client.user_id, call_id)]
-        if call.others is None:
-            call.others = {}
-        call.others[user_id] = device_id
+    def track_others(self, conf_id: str, device_id: str, user_id: str) -> None:
+        if conf_id not in self.others:
+            self.others[conf_id] = list()
+        self.others[conf_id].append(Others(user_id, device_id))
 
     async def join_call(self, room: MatrixRoom) -> None:
         if room.room_id not in self.room_conf:
@@ -270,7 +284,6 @@ class Recorder:
             candidate_waiter=self.loop.create_future(),
             prepare_waiter=self.loop.create_future(),
             room_id=room.room_id if room else None,
-            others={},
         )
         logger.info("Adding tracks")
         input_tracks = {}
@@ -375,16 +388,21 @@ class Recorder:
             elif isinstance(event, ToDeviceCallInviteEvent):
                 if unique_id not in self.conns:
                     return
-                if not self.conns[unique_id].others:
+                if event.conf_id not in self.others:
                     return
                 else:
+                    data = self.others[event.conf_id]
+                    user_data: Optional[Others] = None
+                    # Find user in data
+                    for user in data:
+                        if user.user_id == event.sender:
+                            user_data = user
+                            break
 
-                    if event.sender not in self.conns[unique_id].others:  # type: ignore
-                        return
                     message = ToDeviceMessage(
                         type="m.call.hangup",
                         recipient=event.sender,
-                        recipient_device=self.conns[unique_id].others[event.sender],  # type: ignore
+                        recipient_device=user_data.device_id,  # type: ignore
                         content={
                             "call_id": event.call_id,
                             "version": "1",
