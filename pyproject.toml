@@ -1,0 +1,72 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "matrix-call-multitrack-recorder"
+description = 'A tool to record each participant to their own audio file.'
+readme = "README.md"
+requires-python = ">=3.7"
+license = "AGPL-3.0-or-later"
+keywords = []
+authors = [
+  { name = "MTRNord", email = "support@nordgedanken.dev" },
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3.7",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Python :: Implementation :: PyPy",
+]
+dependencies = [
+  "matrix-nio[e2e] @ git+https://github.com/MTRNord/matrix-nio@289ee1dbcf37e1ebbed8d26d6ef026758dc46023",
+  "aioice",
+  "aiortc",
+  "asyncio",
+  "logbook"
+]
+dynamic = ["version"]
+
+[project.urls]
+Documentation = "https://github.com/unknown/matrix-call-multitrack-recorder#readme"
+Issues = "https://github.com/unknown/matrix-call-multitrack-recorder/issues"
+Source = "https://github.com/unknown/matrix-call-multitrack-recorder"
+
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.version]
+path = "matrix_call_multitrack_recorder/__about__.py"
+
+[tool.hatch.envs.default]
+dependencies = [
+  "pytest",
+  "pytest-cov",
+  "black"
+]
+[tool.hatch.envs.default.scripts]
+cov = "pytest --cov-report=term-missing --cov-config=pyproject.toml --cov=matrix_call_multitrack_recorder --cov=tests {args}"
+no-cov = "cov --no-cov {args}"
+
+[[tool.hatch.envs.test.matrix]]
+python = ["37", "38", "39", "310", "311"]
+
+[tool.coverage.run]
+branch = true
+parallel = true
+omit = [
+  "matrix_call_multitrack_recorder/__about__.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+  "no cov",
+  "if __name__ == .__main__.:",
+  "if TYPE_CHECKING:",
+]
