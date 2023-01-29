@@ -2,3 +2,4 @@ credentials.json
 /store
 /recordings
 __pycache__
+/dist
