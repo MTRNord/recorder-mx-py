@@ -24,7 +24,7 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dependencies = [
-  "matrix-nio[e2e] @ git+https://github.com/MTRNord/matrix-nio@289ee1dbcf37e1ebbed8d26d6ef026758dc46023",
+  "matrix-nio[e2e] @ git+https://github.com/MTRNord/matrix-nio@41e90f3f64bf43f4d3cbaa2b55652173073e5511",
   "aioice",
   "aiortc",
   "asyncio",
