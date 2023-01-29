@@ -108,6 +108,15 @@ class RecordingBot:
                 )
             elif event.body.startswith("!stop"):
                 await self.recorder.leave_call(room)
+                await self.client.room_send(
+                    room.room_id,
+                    "m.room.message",
+                    {
+                        "msgtype": "m.notice",
+                        "body": "Recording stopped",
+                    },
+                    ignore_unverified_devices=True,
+                )
             elif event.body.startswith("!start"):
                 await self.recorder.join_call(room)
 
