@@ -146,7 +146,7 @@ class Recorder:
         self.others = {}
         self.output_track = ProxyTrack(
             MediaPlayer(
-                "./test.png",
+                "./black.png",
                 options={
                     "loop": "1",
                     "framerate": "1",
@@ -227,7 +227,7 @@ class Recorder:
             del self.room_conf[room.room_id]
             self.output_track = ProxyTrack(
                 MediaPlayer(
-                    "./test.png",
+                    "./black.png",
                     options={
                         "loop": "1",
                         "framerate": "1",
