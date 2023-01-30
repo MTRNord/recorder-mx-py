@@ -10,20 +10,21 @@ import sys
 from nio.events import to_device
 from nio import (
     AsyncClient,
-    LoginResponse,
-    MatrixRoom,
+    ToDeviceCallAnswerEvent,
     CallInviteEvent,
     CallCandidatesEvent,
     CallHangupEvent,
     ToDeviceCallInviteEvent,
     ToDeviceCallCandidatesEvent,
     ToDeviceCallHangupEvent,
-    AsyncClientConfig,
-    InviteEvent,
     MSC3401CallEvent,
     CallMemberEvent,
     RoomMessageText,
+    MatrixRoom,
+    InviteEvent,
     ProfileGetDisplayNameResponse,
+    LoginResponse,
+    AsyncClientConfig,
 )
 
 from logbook import Logger, StreamHandler
@@ -77,6 +78,9 @@ class RecordingBot:
         self.client.add_to_device_callback(
             self.to_device_call_hangup, (ToDeviceCallHangupEvent,)  # type: ignore
         )
+        self.client.add_to_device_callback(
+            self.call_answer, (ToDeviceCallAnswerEvent,)  # type: ignore
+        )
 
         self.client.add_event_callback(self.cb_autojoin_room, InviteEvent)  # type: ignore
         logger.info("Listening for calls")
@@ -104,19 +108,14 @@ class RecordingBot:
                     },
                     ignore_unverified_devices=True,
                 )
+                await self.client.update_receipt_marker(room.room_id, event.event_id)
             elif event.body.startswith("!stop"):
                 await self.recorder.leave_call(room)
-                await self.client.room_send(
-                    room.room_id,
-                    "m.room.message",
-                    {
-                        "msgtype": "m.notice",
-                        "body": "Recording stopped",
-                    },
-                    ignore_unverified_devices=True,
-                )
+                await self.client.update_receipt_marker(room.room_id, event.event_id)
+
             elif event.body.startswith("!start"):
                 await self.recorder.join_call(room)
+                await self.client.update_receipt_marker(room.room_id, event.event_id)
 
         asyncio.create_task(command_handling())
 
@@ -133,13 +132,17 @@ class RecordingBot:
         # logger.info(f"MSC3401 call member event: {event}")
         if not event.calls:
             await self.recorder.remove_connection(room)
+            self.recorder.remove_other(event.sender)
 
         for call in event.calls:
             for device in call["m.devices"]:
                 if device["device_id"] != self.client.device_id:
                     self.recorder.add_call(call["m.call_id"], room)
                     self.recorder.track_others(
-                        call["m.call_id"], device["device_id"], event.sender
+                        call["m.call_id"],
+                        device["device_id"],
+                        event.sender,
+                        device["session_id"],
                     )
             # TODO: Can I reuse the same connection? Do I have the info needed? Is it a new connection? How do I see if it changed?
             # asyncio.create_task(self.handle_call_invite(event, room))
@@ -152,6 +155,11 @@ class RecordingBot:
         """Handles incoming call invites."""
 
         asyncio.create_task(self.recorder.handle_call_invite(event, room))
+
+    async def call_answer(self, event: ToDeviceCallAnswerEvent) -> None:
+        """Handles incoming call answers."""
+
+        asyncio.create_task(self.recorder.handle_call_answer(event))
 
     async def to_device_call_invite(self, event: CallInviteEvent) -> None:
         """Handles incoming call invites."""

@@ -3,3 +3,4 @@ credentials.json
 /recordings
 __pycache__
 /dist
+/test.png

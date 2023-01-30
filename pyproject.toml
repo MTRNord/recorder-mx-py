@@ -24,11 +24,12 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dependencies = [
-  "matrix-nio[e2e] @ git+https://github.com/MTRNord/matrix-nio@41e90f3f64bf43f4d3cbaa2b55652173073e5511",
+  "matrix-nio[e2e] @ git+https://github.com/MTRNord/matrix-nio@e0e130ec70784b46d0a87f9f9bb1b8df3255de2f",
   "aioice",
   "aiortc",
   "asyncio",
-  "logbook"
+  "logbook",
+  "uvloop"
 ]
 dynamic = ["version"]
 

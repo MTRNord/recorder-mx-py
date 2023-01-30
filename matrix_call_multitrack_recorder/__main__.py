@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 import asyncio
+import uvloop
 import sys
 
 from logbook import Logger, StreamHandler
@@ -29,15 +30,33 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.get_event_loop().run_until_complete(main())
-    except Exception:
-        if BOT:
-            asyncio.get_event_loop().run_until_complete(BOT.stop())
-        logger.exception("Fatal Runtime error.")
-        sys.exit(1)
-    except KeyboardInterrupt:
-        if BOT:
-            asyncio.get_event_loop().run_until_complete(BOT.stop())
-        print("Received keyboard interrupt.")
-        sys.exit(0)
+
+    if sys.version_info >= (3, 11):
+        with asyncio.Runner(loop_factory=uvloop.new_event_loop) as runner:
+            try:
+                runner.get_loop().run_until_complete(main())
+            except Exception:
+                if BOT:
+                    runner.get_loop().run_until_complete(BOT.stop())
+                logger.exception("Fatal Runtime error.")
+                sys.exit(1)
+            except KeyboardInterrupt:
+                if BOT:
+                    runner.get_loop().run_until_complete(BOT.stop())
+                print("Received keyboard interrupt.")
+                sys.exit(0)
+
+    else:
+        uvloop.install()
+        try:
+            asyncio.get_event_loop().run_until_complete(main())
+        except Exception:
+            if BOT:
+                asyncio.get_event_loop().run_until_complete(BOT.stop())
+            logger.exception("Fatal Runtime error.")
+            sys.exit(1)
+        except KeyboardInterrupt:
+            if BOT:
+                asyncio.get_event_loop().run_until_complete(BOT.stop())
+            print("Received keyboard interrupt.")
+            sys.exit(0)
