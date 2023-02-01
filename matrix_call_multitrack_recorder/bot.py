@@ -203,6 +203,10 @@ class RecordingBot:
                 response = f"Hello, I am a bot that records calls. Use !help to see available commands. I was invited by {sender_display_name.displayname}"
             else:
                 response = f"Hello, I am a bot that records calls. Use !help to see available commands. I was invited by {event.sender}"
+            # FIXME: We should also check if the join worked or not.
+            while room.room_id not in self.client.rooms:
+                logger.debug("Waiting for room to be joined")
+                await asyncio.sleep(0.2)
             await self.client.room_send(
                 room.room_id,
                 "m.room.message",
