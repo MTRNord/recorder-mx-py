@@ -7,28 +7,28 @@ import getpass
 import json
 import os
 import sys
-from nio.events import to_device
+
+import logbook  # type: ignore
+from logbook import Logger, StreamHandler
 from nio import (
     AsyncClient,
-    ToDeviceCallAnswerEvent,
-    CallInviteEvent,
+    AsyncClientConfig,
     CallCandidatesEvent,
     CallHangupEvent,
-    ToDeviceCallInviteEvent,
+    CallInviteEvent,
+    CallMemberEvent,
+    InviteEvent,
+    LoginResponse,
+    MatrixRoom,
+    MSC3401CallEvent,
+    ProfileGetDisplayNameResponse,
+    RoomMessageText,
+    ToDeviceCallAnswerEvent,
     ToDeviceCallCandidatesEvent,
     ToDeviceCallHangupEvent,
-    MSC3401CallEvent,
-    CallMemberEvent,
-    RoomMessageText,
-    MatrixRoom,
-    InviteEvent,
-    ProfileGetDisplayNameResponse,
-    LoginResponse,
-    AsyncClientConfig,
+    ToDeviceCallInviteEvent,
 )
-
-from logbook import Logger, StreamHandler
-import logbook
+from nio.events import to_device
 
 from matrix_call_multitrack_recorder.recorder import Recorder
 
@@ -63,8 +63,8 @@ class RecordingBot:
             logger.debug("Uploaded keys")
 
         self.client.add_event_callback(self.message_callback, RoomMessageText)  # type: ignore
-        self.client.add_event_callback(self.call_candidates, CallCandidatesEvent)  # type: ignore
         self.client.add_event_callback(self.call_invite, CallInviteEvent)  # type: ignore
+        self.client.add_event_callback(self.call_candidates, CallCandidatesEvent)  # type: ignore
         self.client.add_event_callback(self.call_hangup, CallHangupEvent)  # type: ignore
         self.client.add_event_callback(self.msc3401_call, MSC3401CallEvent)  # type: ignore
         self.client.add_event_callback(self.msc3401_call_member, CallMemberEvent)  # type: ignore
@@ -188,7 +188,7 @@ class RecordingBot:
         """Handles call hangups."""
         asyncio.create_task(self.recorder.handle_call_hangup(None, event))
 
-    async def cb_autojoin_room(self, room: MatrixRoom, event: InviteEvent):
+    async def cb_autojoin_room(self, room: MatrixRoom, event: InviteEvent) -> None:
         """Callback to automatically joins a Matrix room on invite.
 
         Arguments:
@@ -196,7 +196,7 @@ class RecordingBot:
             event {InviteEvent} -- Provided by nio
         """
 
-        async def join_task():
+        async def join_task() -> None:
             await self.client.join(room.room_id)
             sender_display_name = await self.client.get_displayname(event.sender)
             if isinstance(sender_display_name, ProfileGetDisplayNameResponse):

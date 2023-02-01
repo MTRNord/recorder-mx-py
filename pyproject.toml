@@ -50,7 +50,8 @@ dependencies = [
   "pytest",
   "pytest-cov",
   "black",
-  "pylint"
+  "pylint",
+  "mypy"
 ]
 [tool.hatch.envs.default.scripts]
 cov = "pytest --cov-report=term-missing --cov-config=pyproject.toml --cov=matrix_call_multitrack_recorder --cov=tests {args}"

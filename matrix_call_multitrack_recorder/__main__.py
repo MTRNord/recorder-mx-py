@@ -3,11 +3,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 import asyncio
-import uvloop
 import sys
 
-from logbook import Logger, StreamHandler
 import logbook
+import uvloop
+from logbook import Logger, StreamHandler
 
 from matrix_call_multitrack_recorder.bot import RecordingBot, login
 

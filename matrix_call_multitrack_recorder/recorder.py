@@ -3,43 +3,52 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 import asyncio
-from dataclasses import dataclass
-from fractions import Fraction
 import os
 import random
 import string
-from typing import Dict, List, Optional, Tuple, Union
 import sys
 import time
-from logbook import Logger, StreamHandler
-import logbook
-from nio import (
-    AsyncClient,
-    CallInviteEvent,
-    MatrixRoom,
-    ToDeviceMessage,
-    CallCandidatesEvent,
-    RoomGetStateError,
-    ToDeviceCallCandidatesEvent,
-    CallHangupEvent,
-    ToDeviceCallInviteEvent,
-    ToDeviceCallHangupEvent,
-    ToDeviceCallAnswerEvent,
-    # ToDeviceCallNegotiateEvent,
-    # CallNegotiateEvent,
-)
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple, Union
+
+# This one is actually used. Sadly we cant tell py that
+import av  # type: ignore
+
+import logbook  # type: ignore
+from aioice.candidate import Candidate
 from aiortc import (
+    MediaStreamTrack,
+    RTCConfiguration,
+    RTCIceCandidate,
+    RTCIceGatherer,
+    RTCIceServer,
     RTCPeerConnection,
     RTCSessionDescription,
-    MediaStreamTrack,
-    RTCIceGatherer,
-    RTCIceCandidate,
 )
-from aiortc.contrib.media import MediaRecorder, MediaPlayer, MediaStreamError, Frame
+from aiortc.contrib.media import Frame, MediaPlayer, MediaRecorder, MediaStreamError
 from aiortc.rtcicetransport import candidate_from_aioice, candidate_to_aioice
-from aioice.candidate import Candidate
-import av
-from av.filter import Filter, Graph
+
+# This one is actually used. Sadly we cant tell py that
+from av.filter import (
+    Filter,
+    Graph,
+)  # type: ignore
+from logbook import Logger, StreamHandler
+from nio import (  # ToDeviceCallNegotiateEvent,; CallNegotiateEvent,
+    AsyncClient,
+    CallCandidatesEvent,
+    CallHangupEvent,
+    CallInviteEvent,
+    MatrixRoom,
+    RoomGetStateError,
+    ToDeviceCallAnswerEvent,
+    ToDeviceCallCandidatesEvent,
+    ToDeviceCallHangupEvent,
+    ToDeviceCallInviteEvent,
+    ToDeviceMessage,
+)
+from .utils.future_map import FutureMap
+from .utils.misc_types import InputTracks
 
 # import logging
 
@@ -59,6 +68,9 @@ ConfID = str
 RoomID = str
 UniqueCallID = Tuple[UserID, ConfID]
 
+# TODO: Make via config
+STUN = RTCConfiguration(iceServers=[RTCIceServer(urls="stun:turn.matrix.org")])
+
 
 @dataclass
 class WrappedConn:
@@ -76,9 +88,8 @@ class Others:
 
 
 class ProxyTrack(MediaStreamTrack):
-    _source: MediaStreamTrack
-    _source_wait: Optional[asyncio.Future]
-    _graph: Optional[Graph]
+    __source: MediaStreamTrack
+    __graph: Optional[Graph]
 
     def __init__(
         self,
@@ -86,46 +97,47 @@ class ProxyTrack(MediaStreamTrack):
     ) -> None:
         super().__init__()
         self.kind = source.video.kind
-        self._source = source.video
-        self._graph = None
+        self.__source = source.video
+        self.__graph = None
 
     async def start(self, frame: Frame) -> None:
-        self._graph = Graph()
-        graph_source = self._graph.add_buffer(template=frame)
+        self.__graph = Graph()
+        graph_source = self.__graph.add_buffer(template=frame)
 
-        graph_filter = self._graph.add(
+        graph_filter = self.__graph.add(
             "drawtext",
             r"text='Recording Duration: %{pts:gmtime:0:%H\:%M\:%S}':x=(w-text_w)/2:y=(h-text_h)/2:fontcolor=white:fontsize=128",
         )
-        graph_sink = self._graph.add("buffersink")
+        graph_sink = self.__graph.add("buffersink")
 
         graph_source.link_to(graph_filter, 0, 0)
         graph_filter.link_to(graph_sink, 0, 0)
-        self._graph.configure()
+        self.__graph.configure()
 
     async def recv(self) -> Frame:
         try:
-            frame = await self._source.recv()
-            if self._graph is None:
+            frame = await self.__source.recv()
+            if not self.__graph:
                 await self.start(frame)
-            self._graph.push(frame)
-            filtered_frame = self._graph.pull()
-            return filtered_frame
+            if self.__graph:
+                self.__graph.push(frame)
+                filtered_frame = self.__graph.pull()
+                return filtered_frame
         except MediaStreamError as e:
-            frame = await self._source.recv()
+            frame = await self.__source.recv()
             logger.warning(f"Error in recv: {e}")
             return frame
         except Exception as e:
             logger.warning(f"Error in recv: {e}")
-            return await self._source.recv()
+            return await self.__source.recv()
 
     def stop(self) -> None:
-        self._source.stop()
+        self.__source.stop()
         super().stop()
 
 
 class Recorder:
-    __conns: Dict[UniqueCallID, WrappedConn]
+    __conns: FutureMap[UniqueCallID, WrappedConn]
     party_id: str
     client: AsyncClient
     loop: asyncio.AbstractEventLoop
@@ -140,10 +152,12 @@ class Recorder:
         self.loop = asyncio.get_event_loop()
 
     async def start(self) -> None:
-        self.__conns = {}
+        self.__conns = FutureMap()
         self.conf_room = {}
         self.room_conf = {}
         self.others = {}
+        # Prepare the Track we show when starting a recording
+        # FIXME: This is probably wrong? Since we should have this per recording session.
         self.output_track = ProxyTrack(
             MediaPlayer(
                 "./black.png",
@@ -166,7 +180,7 @@ class Recorder:
 
     async def stop(self) -> None:
         logger.info("Stopping recording handler")
-        for (_, conf_or_call_id), conn in self.__conns.items():
+        for (_, conf_or_call_id), conn in await self.__conns.items():
             await self.hangup(conf_or_call_id, conn)
 
     def add_call(self, conf_id: ConfID, room: MatrixRoom) -> None:
@@ -217,7 +231,7 @@ class Recorder:
     async def leave_call(self, room: MatrixRoom) -> None:
         if room.room_id in self.room_conf:
             conf_id = self.room_conf[room.room_id]
-            for (user_id, conf_or_call_id), conn in list(self.__conns.items()):
+            for (user_id, conf_or_call_id), conn in list(await self.__conns.items()):
                 if conf_or_call_id == conf_id:
                     await self.hangup(conf_or_call_id, conn)
                     del self.__conns[(user_id, conf_or_call_id)]
@@ -248,10 +262,9 @@ class Recorder:
     async def remove_connection(self, room: MatrixRoom) -> None:
         if room.room_id in self.room_conf:
             call_id = self.room_conf[room.room_id]
-            if (self.client.user_id, call_id) in self.__conns:
-                del self.__conns[(self.client.user_id, call_id)]
-                del self.room_conf[room.room_id]
-                del self.conf_room[call_id]
+            del self.__conns[(self.client.user_id, call_id)]
+            del self.room_conf[room.room_id]
+            del self.conf_room[call_id]
 
     def track_others(
         self, conf_id: str, device_id: str, user_id: str, session_id: str
@@ -328,20 +341,18 @@ class Recorder:
                     continue
 
                 logger.info(f"Making offer for {data.user_id}")
+
                 # Create offer
-                pc = RTCPeerConnection()
+                pc = RTCPeerConnection(STUN)
                 logger.info(f"Started ice for {call_id}")
                 unique_id = (data.user_id, self.room_conf[room.room_id])
-                conn = self.__conns[unique_id] = WrappedConn(
+                conn = WrappedConn(
                     pc=pc,
                     candidate_waiter=None,
                     prepare_waiter=None,
                     room_id=room.room_id if room else None,
                 )
                 logger.info(f"Created connection {unique_id}")
-
-                # conn.pc.addTransceiver("video", direction="recvonly")
-                # conn.pc.addTransceiver("audio", direction="recvonly")
 
                 conn.pc.addTrack(self.output_track)
 
@@ -364,12 +375,9 @@ class Recorder:
                             )
                         )
 
-                # @conn.pc.on("connectionstatechange")
-                # async def on_connectionstatechange() -> None:
-                #    if conn.pc.connectionState == "failed":
-                #        logger.info(f"Connection {unique_id} failed")
-                #        await conn.pc.close()
-                #        self.__conns.pop(unique_id, None)
+                # We set this late to make sure the connection is actually set up before we handle the answer.
+                # Order of operation is weird otherwise.
+                self.__conns[unique_id] = conn
 
                 offer_message = ToDeviceMessage(
                     "m.call.invite",
@@ -424,7 +432,6 @@ class Recorder:
                     },
                 )
                 await self.client.to_device(candidates_message)
-                await asyncio.sleep(0)
 
     # async def handle_negotiation(
     #    self,
@@ -433,7 +440,7 @@ class Recorder:
     # ):
     #    pass
 
-    async def handle_call_answer(self, event: ToDeviceCallAnswerEvent):
+    async def handle_call_answer(self, event: ToDeviceCallAnswerEvent) -> None:
         logger.info(f"Received call answer from {event.sender}")
 
         unique_id: UniqueCallID = (event.sender, event.conf_id)
@@ -443,12 +450,11 @@ class Recorder:
             logger.warning("Got invalid to-device call answer")
             return
 
-        while unique_id not in self.__conns:
-            logger.debug("Waiting for connection of answer to be created")
-            await asyncio.sleep(0.2)
-
         try:
-            conn = self.__conns[unique_id]
+            conn = await asyncio.wait_for(self.__conns[unique_id], timeout=3)
+        except asyncio.TimeoutError:
+            logger.warning("Gave up waiting for call, task canceled")
+            return
         except KeyError:
             logger.warning("Received answer for unknown call")
             return
@@ -467,6 +473,7 @@ class Recorder:
             logger.warning("Received answer for unknown call")
             return
 
+        logger.info(f"Sending select_answer for {unique_id}")
         message = ToDeviceMessage(
             "m.call.select_answer",
             recipient=event.sender,
@@ -536,11 +543,12 @@ class Recorder:
         offer = RTCSessionDescription(
             sdp=str(event.offer.get("sdp")), type=str(event.offer.get("type"))
         )
-        pc = RTCPeerConnection()
+
+        pc = RTCPeerConnection(STUN)
         if isinstance(event, CallInviteEvent):
             unique_id: UniqueCallID = (event.sender, event.call_id)
         else:
-            unique_id: UniqueCallID = (event.sender, event.conf_id)
+            unique_id = (event.sender, event.conf_id)
         conn = self.__conns[unique_id] = WrappedConn(
             pc=pc,
             candidate_waiter=self.loop.create_future(),
@@ -548,7 +556,7 @@ class Recorder:
             room_id=room.room_id if room else None,
         )
         logger.info("Adding tracks")
-        input_tracks = {}
+        input_tracks: InputTracks = {}
 
         async def task() -> None:
             if isinstance(event, CallInviteEvent):
@@ -578,8 +586,9 @@ class Recorder:
             wav_file = os.path.join(conf_path, f"{base_name_audio}.wav")
             mp4_file = os.path.join(conf_path, f"{base_name_video}.mp4")
             audio_recorder = MediaRecorder(wav_file, format="wav")
-            audio_recorder.addTrack(input_tracks["audio"])
-            await audio_recorder.start()
+            if "audio" in input_tracks:
+                audio_recorder.addTrack(input_tracks["audio"])
+                await audio_recorder.start()
             if "video" in input_tracks:
                 video_recorder = MediaRecorder(mp4_file, format="mp4")
                 video_recorder.addTrack(input_tracks["video"])
@@ -587,7 +596,13 @@ class Recorder:
             else:
                 video_recorder = None
 
-            audio_track = input_tracks["audio"]
+            if "audio" in input_tracks:
+                audio_track = input_tracks["audio"]
+
+                @audio_track.on("ended")
+                async def on_ended_audio():
+                    await audio_recorder.stop()
+
             if "video" in input_tracks:
                 video_track = input_tracks["video"]
 
@@ -596,23 +611,22 @@ class Recorder:
                     if video_recorder:
                         await video_recorder.stop()
 
-            @audio_track.on("ended")
-            async def on_ended_audio():
-                await audio_recorder.stop()
-
         logger.info("Setting up callbacks")
 
         @pc.on("connectionstatechange")
         async def on_connectionstatechange() -> None:
             if pc.connectionState == "failed":
                 await pc.close()
-                self.__conns.pop(unique_id, None)
+                del self.__conns[unique_id]
             if pc.connectionState == "connected":
                 asyncio.create_task(task())
 
         @pc.on("track")
         def on_track(track: MediaStreamTrack) -> None:
-            input_tracks[track.kind] = track
+            if track.kind == "audio":
+                input_tracks["audio"] = track
+            elif track.kind == "video":
+                input_tracks["video"] = track
 
         logger.info("Waiting for prepare")
         await pc.setRemoteDescription(offer)
@@ -634,7 +648,7 @@ class Recorder:
         if not answer:
             logger.warning("Failed to create answer")
             await pc.close()
-            self.__conns.pop(unique_id, None)
+            del self.__conns[unique_id]
             if room:
                 await self.hangup(event.call_id, conn)
             elif isinstance(event, ToDeviceCallInviteEvent):
@@ -726,17 +740,17 @@ class Recorder:
         if isinstance(event, CallCandidatesEvent):
             unique_id: UniqueCallID = (event.sender, event.call_id)
         else:
-            unique_id: UniqueCallID = (event.sender, event.conf_id)
+            unique_id = (event.sender, event.conf_id)
 
             if event.conf_id not in self.conf_room:
                 logger.warning("Got invalid to-device call candidates")
                 return
-        while unique_id not in self.__conns:
-            logger.debug("Waiting for connection to be created")
-            await asyncio.sleep(0.2)
 
         try:
-            conn = self.__conns[unique_id]
+            conn = await asyncio.wait_for(self.__conns[unique_id], timeout=3)
+        except asyncio.TimeoutError:
+            logger.warning("Gave up waiting for call, task canceled")
+            return
         except KeyError:
             logger.warning("Received candidates for unknown call")
             return
@@ -780,6 +794,8 @@ class Recorder:
         room: Optional[MatrixRoom],
         event: Union[CallHangupEvent, ToDeviceCallHangupEvent],
     ) -> None:
+        if event.sender == self.client.user_id:
+            return
         reason = None
         if "reason" in event.source["content"]:
             reason = event.source["content"]["reason"]
@@ -791,8 +807,6 @@ class Recorder:
             logger.info(
                 f"Received call hangup from {event.sender} with reason {reason}"
             )
-        if event.sender == self.client.user_id:
-            return
 
         # TODO: This is incorrect:
         if reason == "replaced":
@@ -802,8 +816,12 @@ class Recorder:
             if isinstance(event, CallHangupEvent):
                 unique_id: UniqueCallID = (event.sender, event.call_id)
             else:
-                unique_id: UniqueCallID = (event.sender, event.conf_id)
-            await self.__conns.pop(unique_id).pc.close()
+                unique_id = (event.sender, event.conf_id)
+            try:
+                conn = await asyncio.wait_for(self.__conns[unique_id], timeout=3)
+                await conn.pc.close()
+            except asyncio.TimeoutError:
+                logger.warning("Gave up waiting for call, task canceled")
             if room and isinstance(event, CallHangupEvent):
                 await self.client.update_receipt_marker(room.room_id, event.event_id)
 
