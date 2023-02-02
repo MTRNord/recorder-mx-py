@@ -56,7 +56,6 @@ class RecordingBot:
 
     async def start(self) -> None:
         logger.info("Starting client")
-        await self.recorder.start()
 
         if self.client.should_upload_keys:
             await self.client.keys_upload()
@@ -114,6 +113,7 @@ class RecordingBot:
                 await self.client.update_receipt_marker(room.room_id, event.event_id)
 
             elif event.body.startswith("!start"):
+               
                 await self.recorder.join_call(room)
                 await self.client.update_receipt_marker(room.room_id, event.event_id)
 
@@ -131,8 +131,9 @@ class RecordingBot:
 
         # logger.info(f"MSC3401 call member event: {event}")
         if not event.calls:
-            await self.recorder.remove_connection(room)
-            self.recorder.remove_other(event.sender)
+            conf_id = await self.recorder.remove_connection(room)
+            if conf_id:
+                self.recorder.remove_other(conf_id, event.sender)
 
         for call in event.calls:
             for device in call["m.devices"]:
@@ -144,7 +145,9 @@ class RecordingBot:
                         event.sender,
                         device["session_id"],
                     )
-            # TODO: Can I reuse the same connection? Do I have the info needed? Is it a new connection? How do I see if it changed?
+            # TODO: Can I reuse the same connection? Do I have the info needed?
+            # Is it a new connection? How do I see if it changed?
+
             # asyncio.create_task(self.handle_call_invite(event, room))
 
     async def msc3401_call(self, room: MatrixRoom, event: MSC3401CallEvent) -> None:
@@ -200,9 +203,11 @@ class RecordingBot:
             await self.client.join(room.room_id)
             sender_display_name = await self.client.get_displayname(event.sender)
             if isinstance(sender_display_name, ProfileGetDisplayNameResponse):
-                response = f"Hello, I am a bot that records calls. Use !help to see available commands. I was invited by {sender_display_name.displayname}"
+                response = f"""Hello, I am a bot that records calls. Use !help to see available commands.
+                I was invited by {sender_display_name.displayname}"""
             else:
-                response = f"Hello, I am a bot that records calls. Use !help to see available commands. I was invited by {event.sender}"
+                response = f"""Hello, I am a bot that records calls. Use !help to see available commands.
+                I was invited by {event.sender}"""
             # FIXME: We should also check if the join worked or not.
             while room.room_id not in self.client.rooms:
                 logger.debug("Waiting for room to be joined")

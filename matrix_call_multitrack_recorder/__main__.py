@@ -30,7 +30,6 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-
     if sys.version_info >= (3, 11):
         with asyncio.Runner(loop_factory=uvloop.new_event_loop) as runner:
             try:

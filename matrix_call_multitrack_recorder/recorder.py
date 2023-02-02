@@ -13,7 +13,6 @@ from typing import Dict, List, Optional, Tuple, Union
 
 # This one is actually used. Sadly we cant tell py that
 import av  # type: ignore
-
 import logbook  # type: ignore
 from aioice.candidate import Candidate
 from aiortc import (
@@ -29,10 +28,7 @@ from aiortc.contrib.media import Frame, MediaPlayer, MediaRecorder, MediaStreamE
 from aiortc.rtcicetransport import candidate_from_aioice, candidate_to_aioice
 
 # This one is actually used. Sadly we cant tell py that
-from av.filter import (
-    Filter,
-    Graph,
-)  # type: ignore
+from av.filter import Filter, Graph  # type: ignore
 from logbook import Logger, StreamHandler
 from nio import (  # ToDeviceCallNegotiateEvent,; CallNegotiateEvent,
     AsyncClient,
@@ -47,6 +43,7 @@ from nio import (  # ToDeviceCallNegotiateEvent,; CallNegotiateEvent,
     ToDeviceCallInviteEvent,
     ToDeviceMessage,
 )
+
 from .utils.future_map import FutureMap
 from .utils.misc_types import InputTracks
 
@@ -73,21 +70,22 @@ STUN = RTCConfiguration(iceServers=[RTCIceServer(urls="stun:turn.matrix.org")])
 
 
 @dataclass
-class WrappedConn:
-    pc: RTCPeerConnection
-    prepare_waiter: Optional[asyncio.Future]
-    candidate_waiter: Optional[asyncio.Future]
-    room_id: Optional[str]
-
-
-@dataclass
 class Others:
+    """
+    Data we keep about other users in a call.
+    Mostly needed for to_device messaging when setting up a call late.
+    """
+
     user_id: str
     device_id: str
     session_id: str
 
 
 class ProxyTrack(MediaStreamTrack):
+    """
+    Wrapper for the MediaPlayer to be able to show the duration
+    """
+
     __source: MediaStreamTrack
     __graph: Optional[Graph]
 
@@ -101,6 +99,14 @@ class ProxyTrack(MediaStreamTrack):
         self.__graph = None
 
     async def start(self, frame: Frame) -> None:
+        """
+        This function is used to setup the filter graph that displays the
+        duration of the recording.
+
+        Note that type errors are expected since we interact with ffmpeg here.
+        So graph is actually a C pointer and not a python object.
+        """
+
         self.__graph = Graph()
         graph_source = self.__graph.add_buffer(template=frame)
 
@@ -115,29 +121,56 @@ class ProxyTrack(MediaStreamTrack):
         self.__graph.configure()
 
     async def recv(self) -> Frame:
+        """
+        We handle the next Frame here. First we setup the graph and then use it.
+        we fall back to sending the source image. (Might fail due to ffmpeg.
+        It then results in a grey image.)
+        """
+
+        frame = await self.__source.recv()
         try:
-            frame = await self.__source.recv()
             if not self.__graph:
                 await self.start(frame)
             if self.__graph:
                 self.__graph.push(frame)
                 filtered_frame = self.__graph.pull()
                 return filtered_frame
-        except MediaStreamError as e:
-            frame = await self.__source.recv()
-            logger.warning(f"Error in recv: {e}")
+            else:
+                logger.error("Video Init failed!")
             return frame
-        except Exception as e:
-            logger.warning(f"Error in recv: {e}")
-            return await self.__source.recv()
+        except MediaStreamError as error:
+            logger.warning(f"MediaStreamError in recv: {error}")
+            return frame
+        except Exception as error:
+            logger.warning(f"Exception in recv: {error}")
+            return frame
 
     def stop(self) -> None:
         self.__source.stop()
         super().stop()
 
 
+@dataclass
+class WrappedConn:
+    """
+    The state data of a WebRTC Connection we have running
+    """
+
+    pc: RTCPeerConnection
+    prepare_waiter: Optional[asyncio.Future]
+    candidate_waiter: Optional[asyncio.Future]
+    room_id: Optional[str]
+    input_tracks: InputTracks
+
+
 class Recorder:
+    """
+    Core handling of the bot.
+    This does both the webrtc handshake as well as the recording handling currently.
+    """
+
     __conns: FutureMap[UniqueCallID, WrappedConn]
+    __outputs: dict[RoomID, ProxyTrack]
     party_id: str
     client: AsyncClient
     loop: asyncio.AbstractEventLoop
@@ -145,31 +178,21 @@ class Recorder:
     recording_rooms: List[ConfID]
     room_conf: Dict[RoomID, ConfID]
     others: Dict[ConfID, List[Others]]
-    output_track: ProxyTrack
+    session_id: str
 
     def __init__(self, client) -> None:
         self.client = client
         self.loop = asyncio.get_event_loop()
-
-    async def start(self) -> None:
         self.__conns = FutureMap()
         self.conf_room = {}
         self.room_conf = {}
         self.others = {}
-        # Prepare the Track we show when starting a recording
-        # FIXME: This is probably wrong? Since we should have this per recording session.
-        self.output_track = ProxyTrack(
-            MediaPlayer(
-                "./black.png",
-                options={
-                    "loop": "1",
-                    "framerate": "1",
-                },
-            )
-        )
-
-        self.recording_rooms = list()
+        self.recording_rooms = []
+        self.__outputs = {}
         self.party_id = "".join(
+            random.choices(string.ascii_letters + string.digits, k=8)
+        )
+        self.session_id = "".join(
             random.choices(string.ascii_letters + string.digits, k=8)
         )
 
@@ -179,23 +202,37 @@ class Recorder:
         logger.info("Starting recording handler")
 
     async def stop(self) -> None:
+        """
+        Stops and cleans up the call.
+        This mainly means sending out all hangup events.
+        """
+
         logger.info("Stopping recording handler")
         for (_, conf_or_call_id), conn in await self.__conns.items():
             await self.hangup(conf_or_call_id, conn)
 
     def add_call(self, conf_id: ConfID, room: MatrixRoom) -> None:
+        """
+        Adds the Call room to the internal state.
+        """
+
         logger.info(f"Adding conf {conf_id} to room {room.room_id}")
         self.conf_room[conf_id] = room
         self.room_conf[room.room_id] = conf_id
 
     async def hangup(self, conf_or_call_id: ConfID, conn: WrappedConn) -> None:
+        """
+        This handles the hangup negotiation of a call.
+        It also makes sure to close the WebRTC connection
+        """
+
         hangup = {
             "call_id": conf_or_call_id,
             "version": "1",
             "party_id": self.party_id,
             "conf_id": conf_or_call_id,
         }
-        if conn.room_id:
+        if conn.room_id and conf_or_call_id not in self.others:
             # We are lazy and send it to the room and as to_device message
             await self.client.room_send(
                 conn.room_id,
@@ -203,6 +240,8 @@ class Recorder:
                 hangup,
                 ignore_unverified_devices=True,
             )
+
+        already_sent_to = []
         if conf_or_call_id in self.others:
             # Send it as to_device message
             others = self.others[conf_or_call_id]
@@ -210,6 +249,12 @@ class Recorder:
             for data in others:
                 if data.user_id == self.client.user_id:
                     continue
+                if data in already_sent_to:
+                    continue
+
+                hangup["device_id"] = str(self.client.device_id)
+                hangup["sender_session_id"] = self.session_id
+                hangup["dest_session_id"] = data.session_id
 
                 message = ToDeviceMessage(
                     "m.call.hangup",
@@ -217,38 +262,43 @@ class Recorder:
                     data.device_id,
                     hangup,
                 )
-                logger.info("Sending hangup")
+                logger.info("Sending hangup via to_device")
                 await self.client.to_device(message)
-        await self.client.room_put_state(
-            self.conf_room[conf_or_call_id].room_id,
-            "org.matrix.msc3401.call.member",
-            {"m.calls": []},
-            state_key=self.client.user_id,
-        )
+                already_sent_to.append(data)
+
+        # If as this might be not the case due to races
+        if conf_or_call_id in self.conf_room:
+            await self.client.room_put_state(
+                self.conf_room[conf_or_call_id].room_id,
+                "org.matrix.msc3401.call.member",
+                {"m.calls": []},
+                state_key=self.client.user_id,
+            )
 
         await conn.pc.close()
 
     async def leave_call(self, room: MatrixRoom) -> None:
+        """
+        Handler for the stop command.
+        This sends the hangup events, cleans up the state we have, and resets the media.
+        """
+
         if room.room_id in self.room_conf:
             conf_id = self.room_conf[room.room_id]
-            for (user_id, conf_or_call_id), conn in list(await self.__conns.items()):
-                if conf_or_call_id == conf_id:
-                    await self.hangup(conf_or_call_id, conn)
-                    del self.__conns[(user_id, conf_or_call_id)]
 
-            if conf_id in self.conf_room:
-                del self.conf_room[conf_id]
-            del self.room_conf[room.room_id]
-            self.output_track = ProxyTrack(
-                MediaPlayer(
-                    "./black.png",
-                    options={
-                        "loop": "1",
-                        "framerate": "1",
-                    },
-                )
-            )
+            for other in self.others[conf_id]:
+                # Send Hangups
+                unique_id = (other.user_id, conf_id)
+                try:
+                    conn = await asyncio.wait_for(self.__conns[unique_id], timeout=3)
+                    await self.hangup(conf_id, conn)
+                except asyncio.TimeoutError:
+                    logger.warning("Gave up waiting for call on leave, task canceled")
 
+            # End the connection
+            await self.remove_connection(room)
+
+            # Notify user
             await self.client.room_send(
                 room.room_id,
                 "m.room.message",
@@ -258,29 +308,75 @@ class Recorder:
                 },
                 ignore_unverified_devices=True,
             )
+        else:
+            # Notify user that we didnt have a running recording
+            await self.client.room_send(
+                room.room_id,
+                "m.room.message",
+                {
+                    "msgtype": "m.notice",
+                    "body": "No running recording was found.",
+                },
+                ignore_unverified_devices=True,
+            )
 
-    async def remove_connection(self, room: MatrixRoom) -> None:
+    async def remove_connection(self, room: MatrixRoom) -> Optional[ConfID]:
+        """
+        This resets the connection for a call as well as removing the state.
+        """
         if room.room_id in self.room_conf:
             call_id = self.room_conf[room.room_id]
-            del self.__conns[(self.client.user_id, call_id)]
-            del self.room_conf[room.room_id]
-            del self.conf_room[call_id]
+            unique_id = (self.client.user_id, call_id)
+
+            try:
+                conn = await asyncio.wait_for(self.__conns[unique_id], timeout=3)
+                await conn.pc.close()
+                del self.__conns[unique_id]
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Gave up waiting for call on remove connection, task canceled"
+                )
+
+            # del self.room_conf[room.room_id]
+            # del self.conf_room[call_id]
+
+            return call_id
+        return None
 
     def track_others(
-        self, conf_id: str, device_id: str, user_id: str, session_id: str
+        self, conf_id: ConfID, device_id: str, user_id: UserID, session_id: str
     ) -> None:
+        """
+        Adds members of a call to the internal state.
+        """
+
         if conf_id not in self.others:
-            self.others[conf_id] = list()
+            self.others[conf_id] = []
         self.others[conf_id].append(Others(user_id, device_id, session_id))
 
-    def remove_other(self, user_id: str):
-        for other in self.others.values():
-            other[:] = [o for o in other if o.user_id != user_id]
+    def remove_other(self, conf_id: ConfID, user_id: UserID) -> None:
+        """
+        Removes people that are tracked.
+
+        This should be called if a member leaves.
+        """
+        self.others[conf_id] = [o for o in self.others[conf_id] if o.user_id != user_id]
 
     async def join_call(self, room: MatrixRoom) -> None:
+        """
+        Joins a Call.
+
+        This usually only is used when !start is pressed in a element-call room.
+
+        It sets up a new invite and candidates.
+        """
+
         if room.room_id not in self.room_conf:
             logger.warning(
-                f"Room {room.room_id} is not a call room or we forgot. Trying to get call id from state"
+                f"""
+                Room {room.room_id} is not a call room or we forgot. 
+                Trying to get call id from state.
+                """
             )
             room_state = await self.client.room_get_state(room.room_id)
             if isinstance(room_state, RoomGetStateError):
@@ -327,6 +423,37 @@ class Recorder:
             state_key=self.client.user_id,
         )
 
+        # Borked without GLARE
+        # await self.send_offer(room)
+
+        conf_id = self.room_conf[room.room_id]
+        await self.client.room_put_state(
+            room.room_id,
+            "org.matrix.msc3401.call.member",
+            {
+                "m.calls": [
+                    {
+                        "m.call_id": conf_id,
+                        "m.devices": [
+                            {
+                                "device_id": self.client.device_id,
+                                "expires_ts": int(time.time() * 1000)
+                                + (1000 * 60 * 60),
+                                "session_id": self.session_id,
+                                "feeds": [
+                                    {
+                                        "purpose": "m.usermedia",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            },
+            state_key=self.client.user_id,
+        )
+
+    async def send_offer(self, room: MatrixRoom) -> None:
         # Send offer to others
         conf_id = self.room_conf[room.room_id]
         logger.info(f"Sending offer to others: {conf_id}")
@@ -351,10 +478,49 @@ class Recorder:
                     candidate_waiter=None,
                     prepare_waiter=None,
                     room_id=room.room_id if room else None,
+                    input_tracks={},
                 )
+
+                if room.room_id not in self.__outputs:
+                    self.__outputs[room.room_id] = ProxyTrack(
+                        MediaPlayer(
+                            "./black.png",
+                            options={"loop": "1", "framerate": "1", "hwaccel": "auto"},
+                        )
+                    )
+
                 logger.info(f"Created connection {unique_id}")
 
-                conn.pc.addTrack(self.output_track)
+                conn.pc.addTrack(self.__outputs[room.room_id])
+                conn.pc.addTransceiver("audio", "sendrecv")
+
+                logger.info("Adding tracks")
+
+                base_path = os.path.join(RECORDING_PATH, f"{conf_id}")
+                if not os.path.exists(base_path):
+                    os.mkdir(base_path)
+                base_name_audio = f"{data.user_id}_{call_id}"
+                base_name_video = f"{data.user_id}_{call_id}"
+
+                (wav_file, mp4_file) = self.get_filenames(
+                    base_path, base_name_audio, base_name_video
+                )
+
+                logger.info("Setting up callbacks")
+
+                pc.on(
+                    "connectionstatechange",
+                    lambda conn=conn, unique_id=unique_id, wav_file=wav_file, mp4_file=mp4_file, conf_id=conf_id: self.on_connectionstatechange(
+                        conn, unique_id, wav_file, mp4_file, conf_id
+                    ),
+                )
+
+                pc.on(
+                    "track",
+                    lambda track, conn=conn, user_id=data.user_id: self.on_track(
+                        track, conn, user_id
+                    ),
+                )
 
                 offer = await conn.pc.createOffer()
                 await conn.pc.setLocalDescription(offer)
@@ -365,7 +531,6 @@ class Recorder:
                     gatherer: RTCIceGatherer = (
                         transceiver.sender.transport.transport.iceGatherer
                     )
-                    # await gatherer.gather()
                     for candidate in gatherer.getLocalCandidates():
                         candidate.sdpMid = transceiver.mid
                         candidates.append(
@@ -396,11 +561,18 @@ class Recorder:
                         "party_id": self.party_id,
                         "seq": 0,
                         "device_id": self.client.device_id,
-                        "sender_session_id": f"{self.client.user_id}_{self.client.device_id}_session",
+                        "sender_session_id": self.session_id,
                         "dest_session_id": data.session_id,
                         "capabilities": {
                             "m.call.transferee": False,
                             "m.call.dtmf": False,
+                        },
+                        "org.matrix.msc3077.sdp_stream_metadata": {
+                            pc._RTCPeerConnection__stream_id: {  # type: ignore
+                                "purpose": "m.usermedia",
+                                "audio_muted": True,
+                                "video_muted": False,
+                            }
                         },
                     },
                 )
@@ -427,7 +599,7 @@ class Recorder:
                         "seq": 1,
                         "conf_id": conf_id,
                         "device_id": self.client.device_id,
-                        "sender_session_id": f"{self.client.user_id}_{self.client.device_id}_session",
+                        "sender_session_id": self.session_id,
                         "dest_session_id": data.session_id,
                     },
                 )
@@ -440,7 +612,50 @@ class Recorder:
     # ):
     #    pass
 
+    def on_track(
+        self,
+        track: MediaStreamTrack,
+        conn: WrappedConn,
+        user_id: str,
+        output_track: Optional[ProxyTrack] = None,
+    ) -> None:
+        if track.kind == "audio":
+            logger.info(
+                f"Adding audio track to recording for {user_id} when state {conn.pc.connectionState}"
+            )
+            conn.input_tracks["audio"] = track
+        elif track.kind == "video":
+            logger.info(
+                f"Adding video track to recording for {user_id} when state {conn.pc.connectionState}"
+            )
+            conn.input_tracks["video"] = track
+            if conn.pc and output_track:
+                conn.pc.addTrack(output_track)
+
+    async def on_connectionstatechange(
+        self,
+        conn: WrappedConn,
+        unique_id: UniqueCallID,
+        wav_file: str,
+        mp4_file: str,
+        conf_id: ConfID,
+    ) -> None:
+        if conn.pc.connectionState == "failed":
+            logger.warn(f'State changed to "failed" for {unique_id}')
+            await conn.pc.close()
+            del self.__conns[unique_id]
+        if conn.pc.connectionState == "connected":
+            logger.info(f'State changed to "connected" for {unique_id}')
+            asyncio.create_task(
+                self.start_recording(wav_file, mp4_file, conn.input_tracks, conf_id)
+            )
+
     async def handle_call_answer(self, event: ToDeviceCallAnswerEvent) -> None:
+        """
+        Handles the ToDevice call answer event.
+
+        We only handle the to_device variant since we only initiate the call within 1:1 rooms.
+        """
         logger.info(f"Received call answer from {event.sender}")
 
         unique_id: UniqueCallID = (event.sender, event.conf_id)
@@ -453,7 +668,7 @@ class Recorder:
         try:
             conn = await asyncio.wait_for(self.__conns[unique_id], timeout=3)
         except asyncio.TimeoutError:
-            logger.warning("Gave up waiting for call, task canceled")
+            logger.warning("Gave up waiting for call on call answer, task canceled")
             return
         except KeyError:
             logger.warning("Received answer for unknown call")
@@ -464,6 +679,47 @@ class Recorder:
             RTCSessionDescription(
                 sdp=str(event.answer.get("sdp")), type=str(event.answer.get("type"))
             )
+        )
+
+        stats = await conn.pc.getStats()
+        print(f"Stats for {unique_id}: {stats}")
+        receivers = conn.pc.getTransceivers()
+        for receiver in receivers:
+            print(
+                f"Transceiver kind for {unique_id}: {receiver.kind} - {receiver.currentDirection}"
+            )
+
+        logger.info("Adding tracks")
+
+        if isinstance(event, CallInviteEvent):
+            base_path = RECORDING_PATH
+        else:
+            base_path = os.path.join(RECORDING_PATH, f"{event.conf_id}")
+        if not os.path.exists(base_path):
+            os.mkdir(base_path)
+        base_name_audio = f"{event.sender}_{event.call_id}"
+        base_name_video = f"{event.sender}_{event.call_id}"
+
+        (wav_file, mp4_file) = self.get_filenames(
+            base_path, base_name_audio, base_name_video
+        )
+
+        logger.info("Setting up callbacks")
+
+        conn.pc.on(
+            "track",
+            lambda track, conn=conn, user_id=event.sender: self.on_track(
+                track, conn, user_id
+            ),
+        )
+
+        conn.pc.on(
+            "connectionstatechange",
+            lambda conn=conn, unique_id=unique_id, wav_file=wav_file, mp4_file=mp4_file, conf_id=event.call_id if isinstance(
+                event, CallInviteEvent
+            ) else event.conf_id: self.on_connectionstatechange(
+                conn, unique_id, wav_file, mp4_file, conf_id
+            ),
         )
 
         others = self.others[event.conf_id]
@@ -486,43 +742,90 @@ class Recorder:
                 "seq": 2,
                 "conf_id": event.conf_id,
                 "device_id": self.client.device_id,
-                "sender_session_id": f"{self.client.user_id}_{self.client.device_id}_session",
+                "sender_session_id": self.session_id,
                 "dest_session_id": data.session_id,
             },
         )
         await self.client.to_device(message)
 
-        await self.client.room_put_state(
-            self.conf_room[event.conf_id].room_id,
-            "org.matrix.msc3401.call.member",
-            {
-                "m.calls": [
-                    {
-                        "m.call_id": event.conf_id,
-                        "m.devices": [
-                            {
-                                "device_id": self.client.device_id,
-                                "expires_ts": int(time.time() * 1000)
-                                + (1000 * 60 * 60),
-                                "session_id": f"{self.client.user_id}_{self.client.device_id}_session",
-                                "feeds": [
-                                    {
-                                        "purpose": "m.usermedia",
-                                    }
-                                ],
-                            }
-                        ],
-                    }
-                ]
-            },
-            state_key=self.client.user_id,
-        )
+    def get_filenames(
+        self, base_path: str, base_name_audio: str, base_name_video: str
+    ) -> Tuple[str, str]:
+        if os.path.exists(os.path.join(base_path, f"{base_name_audio}.wav")):
+            i = 1
+            while os.path.exists(os.path.join(base_path, f"{base_name_audio}_{i}.wav")):
+                i += 1
+            base_name_audio = f"{base_name_audio}_{i}"
+
+        if os.path.exists(os.path.join(base_path, f"{base_name_video}.mp4")):
+            i = 1
+            while os.path.exists(os.path.join(base_path, f"{base_name_video}_{i}.mp4")):
+                i += 1
+            base_name_video = f"{base_name_video}_{i}"
+        wav_file = os.path.join(base_path, f"{base_name_audio}")
+        mp4_file = os.path.join(base_path, f"{base_name_video}")
+        return (wav_file, mp4_file)
+
+    async def start_recording(
+        self, wav_file: str, mp4_file: str, input_tracks: InputTracks, conf_id: ConfID
+    ) -> None:
+        if "audio" in input_tracks:
+            track_id = input_tracks["audio"].id
+            wav_file_track_id = f"{wav_file}_{track_id}.wav"
+            logger.info(f"Starting audio recorder for {wav_file_track_id}")
+            audio_recorder = MediaRecorder(wav_file_track_id, format="wav")
+            audio_recorder.addTrack(input_tracks["audio"])
+            await audio_recorder.start()
+            logger.info(f"Started audio recorder for {wav_file_track_id}")
+        if "video" in input_tracks:
+            track_id = input_tracks["video"].id
+            mp4_file_track_id = f"{mp4_file}_{track_id}.mp4"
+            logger.info(f"Starting video recorder for {mp4_file_track_id}")
+            video_recorder = MediaRecorder(mp4_file_track_id, format="mp4")
+            video_recorder.addTrack(input_tracks["video"])
+            await video_recorder.start()
+            logger.info(f"Started video recorder for {mp4_file_track_id}")
+        else:
+            video_recorder = None
+
+        if "audio" in input_tracks:
+            audio_track = input_tracks["audio"]
+
+            @audio_track.on("ended")
+            async def on_ended_audio():
+                if audio_recorder:
+                    logger.info(f"Audio ended for {wav_file}")
+                    await audio_recorder.stop()
+
+        if "video" in input_tracks:
+            video_track = input_tracks["video"]
+
+            @video_track.on("ended")
+            async def on_ended_video():
+                if video_recorder:
+                    logger.info(f"Video ended for {mp4_file}")
+                    await video_recorder.stop()
+
+        if conf_id not in self.recording_rooms:
+            self.recording_rooms.append(conf_id)
+            await self.client.room_send(
+                self.conf_room[conf_id].room_id,
+                "m.room.message",
+                {
+                    "msgtype": "m.notice",
+                    "body": "Successfully started recording",
+                },
+                ignore_unverified_devices=True,
+            )
 
     async def handle_call_invite(
         self,
         event: Union[CallInviteEvent, ToDeviceCallInviteEvent],
         room: Optional[MatrixRoom],
     ) -> None:
+        """
+        Handle any invite we get. The main caller is 1:1 calls.
+        """
         if room:
             logger.info(f"Received call invite from {event.sender} in {room.room_id}")
         else:
@@ -545,6 +848,21 @@ class Recorder:
         )
 
         pc = RTCPeerConnection(STUN)
+        room_id = ""
+        if room:
+            room_id = room.room_id
+        else:
+            if isinstance(event, ToDeviceCallInviteEvent):
+                room_id = self.conf_room[event.conf_id].room_id
+
+        if room_id not in self.__outputs:
+            self.__outputs[room_id] = ProxyTrack(
+                MediaPlayer(
+                    "./black.png",
+                    options={"loop": "1", "framerate": "1", "hwaccel": "auto"},
+                )
+            )
+        pc.addTrack(self.__outputs[room_id])
         if isinstance(event, CallInviteEvent):
             unique_id: UniqueCallID = (event.sender, event.call_id)
         else:
@@ -553,83 +871,75 @@ class Recorder:
             pc=pc,
             candidate_waiter=self.loop.create_future(),
             prepare_waiter=self.loop.create_future(),
+            input_tracks={},
             room_id=room.room_id if room else None,
         )
+
         logger.info("Adding tracks")
-        input_tracks: InputTracks = {}
 
-        async def task() -> None:
-            if isinstance(event, CallInviteEvent):
-                conf_path = RECORDING_PATH
-            else:
-                conf_path = os.path.join(RECORDING_PATH, f"{event.conf_id}")
-            if not os.path.exists(conf_path):
-                os.mkdir(conf_path)
-            base_name_audio = f"{event.sender}_{event.call_id}"
-            base_name_video = f"{event.sender}_{event.call_id}"
-            if os.path.exists(os.path.join(conf_path, f"{base_name_audio}.wav")):
-                i = 1
-                while os.path.exists(
-                    os.path.join(conf_path, f"{base_name_audio}_{i}.wav")
-                ):
-                    i += 1
-                base_name_audio = f"{base_name_audio}_{i}"
+        if isinstance(event, CallInviteEvent):
+            base_path = RECORDING_PATH
+        else:
+            base_path = os.path.join(RECORDING_PATH, f"{event.conf_id}")
+        if not os.path.exists(base_path):
+            os.mkdir(base_path)
+        base_name_audio = f"{event.sender}_{event.call_id}"
+        base_name_video = f"{event.sender}_{event.call_id}"
 
-            if os.path.exists(os.path.join(conf_path, f"{base_name_video}.mp4")):
-                i = 1
-                while os.path.exists(
-                    os.path.join(conf_path, f"{base_name_video}_{i}.mp4")
-                ):
-                    i += 1
-                base_name_video = f"{base_name_video}_{i}"
-
-            wav_file = os.path.join(conf_path, f"{base_name_audio}.wav")
-            mp4_file = os.path.join(conf_path, f"{base_name_video}.mp4")
-            audio_recorder = MediaRecorder(wav_file, format="wav")
-            if "audio" in input_tracks:
-                audio_recorder.addTrack(input_tracks["audio"])
-                await audio_recorder.start()
-            if "video" in input_tracks:
-                video_recorder = MediaRecorder(mp4_file, format="mp4")
-                video_recorder.addTrack(input_tracks["video"])
-                await video_recorder.start()
-            else:
-                video_recorder = None
-
-            if "audio" in input_tracks:
-                audio_track = input_tracks["audio"]
-
-                @audio_track.on("ended")
-                async def on_ended_audio():
-                    await audio_recorder.stop()
-
-            if "video" in input_tracks:
-                video_track = input_tracks["video"]
-
-                @video_track.on("ended")
-                async def on_ended_video():
-                    if video_recorder:
-                        await video_recorder.stop()
+        (wav_file, mp4_file) = self.get_filenames(
+            base_path, base_name_audio, base_name_video
+        )
 
         logger.info("Setting up callbacks")
 
-        @pc.on("connectionstatechange")
-        async def on_connectionstatechange() -> None:
-            if pc.connectionState == "failed":
-                await pc.close()
-                del self.__conns[unique_id]
-            if pc.connectionState == "connected":
-                asyncio.create_task(task())
+        conn.pc.on(
+            "track",
+            lambda track, conn=conn, user_id=event.sender: self.on_track(
+                track, conn, user_id
+            ),
+        )
 
-        @pc.on("track")
-        def on_track(track: MediaStreamTrack) -> None:
-            if track.kind == "audio":
-                input_tracks["audio"] = track
-            elif track.kind == "video":
-                input_tracks["video"] = track
+        conn.pc.on(
+            "connectionstatechange",
+            lambda conn=conn, unique_id=unique_id, wav_file=wav_file, mp4_file=mp4_file, conf_id=event.call_id if isinstance(
+                event, CallInviteEvent
+            ) else event.conf_id: self.on_connectionstatechange(
+                conn, unique_id, wav_file, mp4_file, conf_id
+            ),
+        )
 
         logger.info("Waiting for prepare")
         await pc.setRemoteDescription(offer)
+
+        logger.info("Adding tracks")
+
+        base_path = os.path.join(RECORDING_PATH, self.room_conf[room_id])
+        if not os.path.exists(base_path):
+            os.mkdir(base_path)
+        base_name_audio = f"{event.sender}_{event.call_id}"
+        base_name_video = f"{event.sender}_{event.call_id}"
+
+        (wav_file, mp4_file) = self.get_filenames(
+            base_path, base_name_audio, base_name_video
+        )
+
+        logger.info("Setting up callbacks")
+
+        pc.on(
+            "connectionstatechange",
+            lambda conn=conn, unique_id=unique_id, wav_file=wav_file, mp4_file=mp4_file, conf_id=self.room_conf[
+                room_id
+            ]: self.on_connectionstatechange(
+                conn, unique_id, wav_file, mp4_file, conf_id
+            ),
+        )
+
+        pc.on(
+            "track",
+            lambda track, conn=conn, user_id=event.sender: self.on_track(
+                track, conn, user_id
+            ),
+        )
 
         logger.info("Ready to receive candidates")
         if conn.prepare_waiter:
@@ -654,6 +964,7 @@ class Recorder:
             elif isinstance(event, ToDeviceCallInviteEvent):
                 await self.hangup(event.conf_id, conn)
             return
+
         await pc.setLocalDescription(answer)
 
         logger.info("Sending answer")
@@ -680,13 +991,20 @@ class Recorder:
                     "m.call.transferee": False,
                     "m.call.dtmf": False,
                 },
+                "org.matrix.msc3077.sdp_stream_metadata": {
+                    pc._RTCPeerConnection__stream_id: {  # type: ignore
+                        "purpose": "m.usermedia",
+                        "audio_muted": True,
+                        "video_muted": False,
+                    }
+                },
                 "answer": {
                     "type": pc.localDescription.type,
                     "sdp": pc.localDescription.sdp,
                 },
                 "device_id": self.client.device_id,
                 "dest_session_id": event.source["content"]["sender_session_id"],
-                "sender_session_id": f"{self.client.user_id}_{self.client.device_id}_session",
+                "sender_session_id": self.session_id,
                 "seq": event.source["content"]["seq"],
             }
             to_device_message = ToDeviceMessage(
@@ -697,30 +1015,8 @@ class Recorder:
             )
             await self.client.to_device(to_device_message)
         if room:
-            if event.call_id not in self.recording_rooms:
-                self.recording_rooms.append(event.call_id)
-                await self.client.room_send(
-                    room.room_id,
-                    "m.room.message",
-                    {
-                        "msgtype": "m.notice",
-                        "body": "Successfully started recording",
-                    },
-                    ignore_unverified_devices=True,
-                )
             logger.info(f"Sent answer to {event.sender} in {room.room_id}")
         elif isinstance(event, ToDeviceCallInviteEvent):
-            if event.conf_id not in self.recording_rooms:
-                self.recording_rooms.append(event.conf_id)
-                await self.client.room_send(
-                    self.conf_room[event.conf_id].room_id,
-                    "m.room.message",
-                    {
-                        "msgtype": "m.notice",
-                        "body": "Successfully started recording",
-                    },
-                    ignore_unverified_devices=True,
-                )
             logger.info(
                 f"Sent answer to {event.sender} with device {event.source['sender_device']}"
             )
@@ -730,6 +1026,10 @@ class Recorder:
         room: Optional[MatrixRoom],
         event: Union[CallCandidatesEvent, ToDeviceCallCandidatesEvent],
     ) -> None:
+        """
+        Handle call candidates we get and add them to the connection.
+        """
+
         if room:
             logger.info(
                 f"Received call candidates from {event.sender} in {room.room_id}"
@@ -747,9 +1047,9 @@ class Recorder:
                 return
 
         try:
-            conn = await asyncio.wait_for(self.__conns[unique_id], timeout=3)
+            conn = await asyncio.wait_for(self.__conns[unique_id], timeout=10)
         except asyncio.TimeoutError:
-            logger.warning("Gave up waiting for call, task canceled")
+            logger.warning("Gave up waiting for call candidates, task canceled")
             return
         except KeyError:
             logger.warning("Received candidates for unknown call")
@@ -794,6 +1094,12 @@ class Recorder:
         room: Optional[MatrixRoom],
         event: Union[CallHangupEvent, ToDeviceCallHangupEvent],
     ) -> None:
+        """
+        Handles the hangup.
+
+        Currently this only closes the connection.
+        """
+
         if event.sender == self.client.user_id:
             return
         reason = None
@@ -809,9 +1115,11 @@ class Recorder:
             )
 
         # TODO: This is incorrect:
-        if reason == "replaced":
+        # The session ele-web sends on new_session is dead
+        if reason == "replaced" or reason == "new_session":
             logger.warning("Call was replaced but we ignore that for now")
             return
+
         try:
             if isinstance(event, CallHangupEvent):
                 unique_id: UniqueCallID = (event.sender, event.call_id)
@@ -821,7 +1129,7 @@ class Recorder:
                 conn = await asyncio.wait_for(self.__conns[unique_id], timeout=3)
                 await conn.pc.close()
             except asyncio.TimeoutError:
-                logger.warning("Gave up waiting for call, task canceled")
+                logger.warning("Gave up waiting for call on hangup, task canceled")
             if room and isinstance(event, CallHangupEvent):
                 await self.client.update_receipt_marker(room.room_id, event.event_id)
 

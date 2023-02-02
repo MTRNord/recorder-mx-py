@@ -7,7 +7,7 @@ https://matrix.to/#/!xALORqBdeiSfgdrmUb:bpulse.org/$yjWpFraV0brev_g6Wg7Ke3i-Pc-5
 """
 
 import asyncio
-from typing import AsyncIterator, Dict, Generic, List, Tuple, TypeVar, Union
+from typing import Dict, Generic, List, Tuple, TypeVar, Union
 
 import logbook  # type: ignore
 from logbook import Logger
@@ -20,6 +20,10 @@ logger.level = logbook.INFO
 
 
 class FutureMap(Generic[Key, Value]):
+    """
+    A map that allows you to wait until the key exists
+    """
+
     def __init__(self) -> None:
         self.data: Dict[Key, Union[Value, asyncio.Future[Value]]] = {}
 
