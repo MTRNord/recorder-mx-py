@@ -66,7 +66,7 @@ RoomID = str
 UniqueCallID = Tuple[UserID, ConfID]
 
 # TODO: Make via config
-STUN = RTCConfiguration(iceServers=[RTCIceServer(urls="stun:turn.matrix.org")])
+#STUN = RTCConfiguration(iceServers=[RTCIceServer(urls="stun:turn.matrix.org")])
 
 
 @dataclass
@@ -112,7 +112,7 @@ class ProxyTrack(MediaStreamTrack):
 
         graph_filter = self.__graph.add(
             "drawtext",
-            r"text='Recording Duration: %{pts:gmtime:0:%H\:%M\:%S}':x=(w-text_w)/2:y=(h-text_h)/2:fontcolor=white:fontsize=128",
+            r"text='Recording Duration: %{pts:gmtime:0:%H\:%M\:%S}':x=(w-text_w)/2:y=(h-text_h)/2:fontcolor=white:fontsize=100",
         )
         graph_sink = self.__graph.add("buffersink")
 
@@ -298,6 +298,9 @@ class Recorder:
             # End the connection
             await self.remove_connection(room)
 
+            if room.room_id in self.__outputs:
+                   del self.__outputs[room.room_id]
+
             # Notify user
             await self.client.room_send(
                 room.room_id,
@@ -470,7 +473,8 @@ class Recorder:
                 logger.info(f"Making offer for {data.user_id}")
 
                 # Create offer
-                pc = RTCPeerConnection(STUN)
+                #pc = RTCPeerConnection(STUN)
+                pc = RTCPeerConnection()
                 logger.info(f"Started ice for {call_id}")
                 unique_id = (data.user_id, self.room_conf[room.room_id])
                 conn = WrappedConn(
@@ -485,7 +489,7 @@ class Recorder:
                     self.__outputs[room.room_id] = ProxyTrack(
                         MediaPlayer(
                             "./black.png",
-                            options={"loop": "1", "framerate": "1", "hwaccel": "auto"},
+                            options={"loop": "1", "framerate": "1", "hwaccel": "auto", "c:v": "h264", "preset:v": "ultrafast"},
                         )
                     )
 
@@ -847,7 +851,8 @@ class Recorder:
             sdp=str(event.offer.get("sdp")), type=str(event.offer.get("type"))
         )
 
-        pc = RTCPeerConnection(STUN)
+        #pc = RTCPeerConnection(STUN)
+        pc = RTCPeerConnection()
         room_id = ""
         if room:
             room_id = room.room_id
@@ -910,36 +915,6 @@ class Recorder:
 
         logger.info("Waiting for prepare")
         await pc.setRemoteDescription(offer)
-
-        logger.info("Adding tracks")
-
-        base_path = os.path.join(RECORDING_PATH, self.room_conf[room_id])
-        if not os.path.exists(base_path):
-            os.mkdir(base_path)
-        base_name_audio = f"{event.sender}_{event.call_id}"
-        base_name_video = f"{event.sender}_{event.call_id}"
-
-        (wav_file, mp4_file) = self.get_filenames(
-            base_path, base_name_audio, base_name_video
-        )
-
-        logger.info("Setting up callbacks")
-
-        pc.on(
-            "connectionstatechange",
-            lambda conn=conn, unique_id=unique_id, wav_file=wav_file, mp4_file=mp4_file, conf_id=self.room_conf[
-                room_id
-            ]: self.on_connectionstatechange(
-                conn, unique_id, wav_file, mp4_file, conf_id
-            ),
-        )
-
-        pc.on(
-            "track",
-            lambda track, conn=conn, user_id=event.sender: self.on_track(
-                track, conn, user_id
-            ),
-        )
 
         logger.info("Ready to receive candidates")
         if conn.prepare_waiter:
