@@ -21,8 +21,16 @@ Therefor I do recommend it should not be used in production just yet.
 Due to changes to the nio dependency I currently cant upload it to pypi.
 For now you have to install it from git directly:
 
+### Requirements
+
+#### Ubuntu
+
+- python3-pip
+- git
+- libolm-dev
+
 ```console
-pip install git+https://git.nordgedanken.dev/mtrnord/matrix-call-multitrack-recorder.git
+pip3 install git+https://git.nordgedanken.dev/mtrnord/matrix-call-multitrack-recorder.git
 ```
 
 ## Usage
